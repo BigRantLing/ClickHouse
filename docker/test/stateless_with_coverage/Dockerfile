@@ -1,4 +1,4 @@
-# docker build -t yandex/clickhouse-stateless-with-coverage-test .
+# docker build -t yandex/clickhouse-stateless-test-with-coverage .
 # TODO: that can be based on yandex/clickhouse-stateless-test (llvm version and CMD differs)
 FROM yandex/clickhouse-test-base
 
@@ -11,13 +11,11 @@ RUN apt-get update -y \
             tzdata \
             fakeroot \
             debhelper \
-            zookeeper \
-            zookeeperd \
             expect \
-            python \
-            python-lxml \
-            python-termcolor \
-            python-requests \
+            python3 \
+            python3-lxml \
+            python3-termcolor \
+            python3-requests \
             sudo \
             openssl \
             ncdu \
@@ -26,14 +24,17 @@ RUN apt-get update -y \
             tree \
             moreutils \
             brotli \
+            zstd \
             gdb \
             lsof \
             unixodbc \
             wget \
-            qemu-user-static
+            qemu-user-static \
+            procps \
+            psmisc
 
 RUN mkdir -p /tmp/clickhouse-odbc-tmp \
-   && wget --quiet -O - ${odbc_driver_url} | tar --strip-components=1 -xz -C /tmp/clickhouse-odbc-tmp \
+   && wget -nv -O - ${odbc_driver_url} | tar --strip-components=1 -xz -C /tmp/clickhouse-odbc-tmp \
    && cp /tmp/clickhouse-odbc-tmp/lib64/*.so /usr/local/lib/ \
    && odbcinst -i -d -f /tmp/clickhouse-odbc-tmp/share/doc/clickhouse-odbc/config/odbcinst.ini.sample \
    && odbcinst -i -s -l -f /tmp/clickhouse-odbc-tmp/share/doc/clickhouse-odbc/config/odbc.ini.sample \

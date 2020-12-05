@@ -10,6 +10,7 @@
 #include <DataTypes/NestedUtils.h>
 #include <Interpreters/joinDispatch.h>
 #include <Interpreters/TableJoin.h>
+#include <Interpreters/castColumn.h>
 #include <Common/assert_cast.h>
 #include <Common/quoteString.h>
 
@@ -44,8 +45,9 @@ StorageJoin::StorageJoin(
     const ColumnsDescription & columns_,
     const ConstraintsDescription & constraints_,
     bool overwrite_,
-    const Context & context_)
-    : StorageSetOrJoinBase{relative_path_, table_id_, columns_, constraints_, context_}
+    const Context & context_,
+    bool persistent_)
+    : StorageSetOrJoinBase{relative_path_, table_id_, columns_, constraints_, context_, persistent_}
     , key_names(key_names_)
     , use_nulls(use_nulls_)
     , limits(limits_)
@@ -99,7 +101,10 @@ HashJoinPtr StorageJoin::getJoin(std::shared_ptr<TableJoin> analyzed_join) const
 
 
 void StorageJoin::insertBlock(const Block & block) { join->addJoinedBlock(block, true); }
+
 size_t StorageJoin::getSize() const { return join->getTotalRowCount(); }
+std::optional<UInt64> StorageJoin::totalRows(const Settings &) const { return join->getTotalRowCount(); }
+std::optional<UInt64> StorageJoin::totalBytes(const Settings &) const { return join->getTotalByteCount(); }
 
 
 void registerStorageJoin(StorageFactory & factory)
@@ -118,6 +123,7 @@ void registerStorageJoin(StorageFactory & factory)
         auto join_overflow_mode = settings.join_overflow_mode;
         auto join_any_take_last_row = settings.join_any_take_last_row;
         auto old_any_join = settings.any_join_distinct_right_table_keys;
+        bool persistent = true;
 
         if (args.storage_def && args.storage_def->settings)
         {
@@ -135,6 +141,12 @@ void registerStorageJoin(StorageFactory & factory)
                     join_any_take_last_row = setting.value;
                 else if (setting.name == "any_join_distinct_right_table_keys")
                     old_any_join = setting.value;
+                else if (setting.name == "persistent")
+                {
+                    auto join_settings = std::make_unique<JoinSettings>();
+                    join_settings->loadFromQuery(*args.storage_def);
+                    persistent = join_settings->persistent;
+                }
                 else
                     throw Exception(
                         "Unknown setting " + setting.name + " for storage " + args.engine_name,
@@ -217,7 +229,8 @@ void registerStorageJoin(StorageFactory & factory)
             args.columns,
             args.constraints,
             join_any_take_last_row,
-            args.context);
+            args.context,
+            persistent);
     };
 
     factory.registerStorage("Join", creator_fn, StorageFactory::StorageFeatures{ .supports_settings = true, });
@@ -309,7 +322,7 @@ private:
     template <ASTTableJoin::Kind KIND, ASTTableJoin::Strictness STRICTNESS, typename Maps>
     Chunk createChunk(const Maps & maps)
     {
-        MutableColumns columns = restored_block.cloneEmpty().mutateColumns();
+        MutableColumns mut_columns = restored_block.cloneEmpty().mutateColumns();
 
         size_t rows_added = 0;
 
@@ -317,7 +330,7 @@ private:
         {
 #define M(TYPE)                                           \
     case HashJoin::Type::TYPE:                                \
-        rows_added = fillColumns<KIND, STRICTNESS>(*maps.TYPE, columns); \
+        rows_added = fillColumns<KIND, STRICTNESS>(*maps.TYPE, mut_columns); \
         break;
             APPLY_FOR_JOIN_VARIANTS_LIMITED(M)
 #undef M
@@ -330,19 +343,23 @@ private:
         if (!rows_added)
             return {};
 
-        /// Correct nullability
+        Columns columns;
+        columns.reserve(mut_columns.size());
+        for (auto & col : mut_columns)
+            columns.emplace_back(std::move(col));
+
+        /// Correct nullability and LowCardinality types
         for (size_t i = 0; i < columns.size(); ++i)
         {
-            bool src_nullable = restored_block.getByPosition(i).type->isNullable();
-            bool dst_nullable = sample_block.getByPosition(i).type->isNullable();
+            const auto & src = restored_block.getByPosition(i);
+            const auto & dst = sample_block.getByPosition(i);
 
-            if (src_nullable && !dst_nullable)
+            if (!src.type->equals(*dst.type))
             {
-                auto & nullable_column = assert_cast<ColumnNullable &>(*columns[i]);
-                columns[i] = nullable_column.getNestedColumnPtr()->assumeMutable();
+                auto arg = src;
+                arg.column = std::move(columns[i]);
+                columns[i] = castColumn(arg, dst.type);
             }
-            else if (!src_nullable && dst_nullable)
-                columns[i] = makeNullable(std::move(columns[i]))->assumeMutable();
         }
 
         UInt64 num_rows = columns.at(0)->size();
@@ -439,7 +456,7 @@ private:
 Pipe StorageJoin::read(
     const Names & column_names,
     const StorageMetadataPtr & metadata_snapshot,
-    const SelectQueryInfo & /*query_info*/,
+    SelectQueryInfo & /*query_info*/,
     const Context & /*context*/,
     QueryProcessingStage::Enum /*processed_stage*/,
     size_t max_block_size,
