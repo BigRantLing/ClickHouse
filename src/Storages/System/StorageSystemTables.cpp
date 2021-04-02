@@ -4,6 +4,7 @@
 #include <DataTypes/DataTypeDateTime.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <Storages/System/StorageSystemTables.h>
+#include <Storages/SelectQueryInfo.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <Databases/IDatabase.h>
 #include <Access/ContextAccess.h>
@@ -14,7 +15,7 @@
 #include <Common/StringUtils/StringUtils.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/DataTypeArray.h>
-#include <Disks/StoragePolicy.h>
+#include <Disks/IStoragePolicy.h>
 #include <Processors/Sources/SourceWithProgress.h>
 #include <Processors/Pipe.h>
 #include <DataTypes/DataTypeUUID.h>
@@ -61,14 +62,21 @@ StorageSystemTables::StorageSystemTables(const StorageID & table_id_)
 }
 
 
-static ColumnPtr getFilteredDatabases(const ASTPtr & query, const Context & context)
+static ColumnPtr getFilteredDatabases(const SelectQueryInfo & query_info, const Context & context)
 {
     MutableColumnPtr column = ColumnString::create();
-    for (const auto & db : DatabaseCatalog::instance().getDatabases())
-        column->insert(db.first);
+
+    const auto databases = DatabaseCatalog::instance().getDatabases();
+    for (const auto & database_name : databases | boost::adaptors::map_keys)
+    {
+        if (database_name == DatabaseCatalog::TEMPORARY_DATABASE)
+            continue; /// We don't want to show the internal database for temporary tables in system.tables
+
+        column->insert(database_name);
+    }
 
     Block block { ColumnWithTypeAndName(std::move(column), std::make_shared<DataTypeString>(), "database") };
-    VirtualColumnUtils::filterBlockWithQuery(query, block, context);
+    VirtualColumnUtils::filterBlockWithQuery(query_info.query, block, context);
     return block.getByPosition(0).column;
 }
 
@@ -191,7 +199,11 @@ protected:
 
                         // create_table_query
                         if (columns_mask[src_index++])
-                            res_columns[res_index++]->insertDefault();
+                        {
+                            auto temp_db = DatabaseCatalog::instance().getDatabaseForTemporaryTables();
+                            ASTPtr ast = temp_db ? temp_db->tryGetCreateTableQuery(table.second->getStorageID().getTableName(), context) : nullptr;
+                            res_columns[res_index++]->insert(ast ? queryToString(ast) : "");
+                        }
 
                         // engine_full
                         if (columns_mask[src_index++])
@@ -347,6 +359,7 @@ protected:
                     {
                         auto & create = ast->as<ASTCreateQuery &>();
                         create.uuid = UUIDHelpers::Nil;
+                        create.to_inner_uuid = UUIDHelpers::Nil;
                     }
 
                     if (columns_mask[src_index++])
@@ -512,7 +525,7 @@ Pipe StorageSystemTables::read(
         }
     }
 
-    ColumnPtr filtered_databases_column = getFilteredDatabases(query_info.query, context);
+    ColumnPtr filtered_databases_column = getFilteredDatabases(query_info, context);
 
     return Pipe(std::make_shared<TablesBlockSource>(
         std::move(columns_mask), std::move(res_block), max_block_size, std::move(filtered_databases_column), context));

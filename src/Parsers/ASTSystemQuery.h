@@ -20,9 +20,11 @@ public:
         UNKNOWN,
         SHUTDOWN,
         KILL,
+        SUSPEND,
         DROP_DNS_CACHE,
         DROP_MARK_CACHE,
         DROP_UNCOMPRESSED_CACHE,
+        DROP_MMAP_CACHE,
 #if USE_EMBEDDED_COMPILER
         DROP_COMPILED_EXPRESSION_CACHE,
 #endif
@@ -36,6 +38,7 @@ public:
         RELOAD_DICTIONARIES,
         RELOAD_EMBEDDED_DICTIONARIES,
         RELOAD_CONFIG,
+        RELOAD_SYMBOLS,
         STOP_MERGES,
         START_MERGES,
         STOP_TTL_MERGES,
@@ -64,9 +67,10 @@ public:
     String table;
     String replica;
     String replica_zk_path;
-    bool is_drop_whole_replica;
+    bool is_drop_whole_replica{};
     String storage_policy;
     String volume;
+    UInt64 seconds{};
 
     String getID(char) const override { return "SYSTEM query"; }
 

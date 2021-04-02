@@ -7,6 +7,7 @@
 #include <Parsers/ASTAlterQuery.h>
 #include <Parsers/ASTCreateQuery.h>
 #include <Parsers/ASTColumnDeclaration.h>
+#include <Parsers/ASTIndexDeclaration.h>
 #include <Parsers/MySQL/ASTCreateQuery.h>
 #include <Parsers/MySQL/ASTAlterCommand.h>
 #include <Parsers/MySQL/ASTDeclareColumn.h>
@@ -21,6 +22,8 @@
 #include <Common/assert_cast.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/InterpreterCreateQuery.h>
+#include <Interpreters/ExpressionAnalyzer.h>
+#include <Interpreters/TreeRewriter.h>
 #include <Storages/IStorage.h>
 
 namespace DB
@@ -164,20 +167,47 @@ static inline std::tuple<NamesAndTypesList, NamesAndTypesList, NamesAndTypesList
 
     if (indices_define && !indices_define->children.empty())
     {
+        NameSet columns_name_set;
+        const Names & columns_name = columns.getNames();
+        columns_name_set.insert(columns_name.begin(), columns_name.end());
+
+        const auto & remove_prefix_key = [&](const ASTPtr & node) -> ASTPtr
+        {
+            auto res = std::make_shared<ASTExpressionList>();
+            for (const auto & index_expression : node->children)
+            {
+                res->children.emplace_back(index_expression);
+
+                if (const auto & function = index_expression->as<ASTFunction>())
+                {
+                    /// column_name(int64 literal)
+                    if (columns_name_set.count(function->name) && function->arguments->children.size() == 1)
+                    {
+                        const auto & prefix_limit = function->arguments->children[0]->as<ASTLiteral>();
+
+                        if (prefix_limit && isInt64FieldType(prefix_limit->value.getType()))
+                            res->children.back() = std::make_shared<ASTIdentifier>(function->name);
+                    }
+                }
+            }
+            return res;
+        };
+
         for (const auto & declare_index_ast : indices_define->children)
         {
             const auto & declare_index = declare_index_ast->as<MySQLParser::ASTDeclareIndex>();
+            const auto & index_columns = remove_prefix_key(declare_index->index_columns);
 
             /// flatten
             if (startsWith(declare_index->index_type, "KEY_"))
                 keys->arguments->children.insert(keys->arguments->children.end(),
-                    declare_index->index_columns->children.begin(), declare_index->index_columns->children.end());
+                    index_columns->children.begin(), index_columns->children.end());
             else if (startsWith(declare_index->index_type, "UNIQUE_"))
-                unique_keys->arguments->children.insert(keys->arguments->children.end(),
-                    declare_index->index_columns->children.begin(), declare_index->index_columns->children.end());
+                unique_keys->arguments->children.insert(unique_keys->arguments->children.end(),
+                    index_columns->children.begin(), index_columns->children.end());
             if (startsWith(declare_index->index_type, "PRIMARY_KEY_"))
-                primary_keys->arguments->children.insert(keys->arguments->children.end(),
-                    declare_index->index_columns->children.begin(), declare_index->index_columns->children.end());
+                primary_keys->arguments->children.insert(primary_keys->arguments->children.end(),
+                    index_columns->children.begin(), index_columns->children.end());
         }
     }
 
@@ -382,12 +412,25 @@ ASTs InterpreterCreateImpl::getRewrittenQueries(
         return column_declaration;
     };
 
-    /// Add _sign and _version column.
+    /// Add _sign and _version columns.
     String sign_column_name = getUniqueColumnName(columns_name_and_type, "_sign");
     String version_column_name = getUniqueColumnName(columns_name_and_type, "_version");
     columns->set(columns->columns, InterpreterCreateQuery::formatColumns(columns_name_and_type));
     columns->columns->children.emplace_back(create_materialized_column_declaration(sign_column_name, "Int8", UInt64(1)));
     columns->columns->children.emplace_back(create_materialized_column_declaration(version_column_name, "UInt64", UInt64(1)));
+
+    /// Add minmax skipping index for _version column.
+    auto version_index = std::make_shared<ASTIndexDeclaration>();
+    version_index->name = version_column_name;
+    auto index_expr = std::make_shared<ASTIdentifier>(version_column_name);
+    auto index_type = makeASTFunction("minmax");
+    index_type->no_empty_args = true;
+    version_index->set(version_index->expr, index_expr);
+    version_index->set(version_index->type, index_type);
+    version_index->granularity = 1;
+    ASTPtr indices = std::make_shared<ASTExpressionList>();
+    indices->children.push_back(version_index);
+    columns->set(columns->indices, indices);
 
     auto storage = std::make_shared<ASTStorage>();
 

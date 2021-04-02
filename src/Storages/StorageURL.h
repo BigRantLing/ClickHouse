@@ -4,12 +4,15 @@
 #include <Poco/URI.h>
 #include <ext/shared_ptr_helper.h>
 #include <DataStreams/IBlockOutputStream.h>
-#include <IO/ConnectionTimeouts.h>
+#include <Formats/FormatSettings.h>
 #include <IO/CompressionMethod.h>
 
 
 namespace DB
 {
+
+struct ConnectionTimeouts;
+
 /**
  * This class represents table engine for external urls.
  * It sends HTTP GET to server when select is called and
@@ -42,7 +45,6 @@ protected:
         const String & compression_method_);
 
     Poco::URI uri;
-    const Context & context_global;
     String compression_method;
     String format_name;
     // For URL engine, we use format settings from server context + `SETTINGS`
@@ -111,11 +113,7 @@ public:
             const ColumnsDescription & columns_,
             const ConstraintsDescription & constraints_,
             Context & context_,
-            const String & compression_method_)
-        : IStorageURLBase(uri_, context_, table_id_, format_name_,
-            format_settings_, columns_, constraints_, compression_method_)
-    {
-    }
+            const String & compression_method_);
 
     String getName() const override
     {
